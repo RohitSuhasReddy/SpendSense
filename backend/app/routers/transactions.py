@@ -13,6 +13,7 @@ from app.services.classifier import (
     learn_mapping,
     mark_recurring,
 )
+from app.services.llm_transport import get_last_llm_error
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
@@ -54,6 +55,7 @@ def classifier_status():
     return {
         "llm_enabled": bool(provider),
         "llm_provider": provider,
+        "llm_error": get_last_llm_error() or None,
     }
 
 
@@ -96,6 +98,7 @@ def reclassify(db: Session = Depends(get_db), user: User = Depends(get_current_u
         "updated": updated,
         "classified": classified,
         "llm_provider": active_llm_provider(),
+        "llm_error": get_last_llm_error() or None,
     }
 
 
