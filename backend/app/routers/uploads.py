@@ -11,6 +11,14 @@ from app.services.pdf_parser import parse_statement_pdf
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
 
+def _classification_context(item: dict) -> str:
+    timestamp = item["txn_date"].strftime("%H:%M")
+    return (
+        f'{item["cleaned_description"]} | amount=₹{item["amount"]:.2f} '
+        f'| source={item["source"]} | time={timestamp}'
+    )
+
+
 @router.post("/pdf", response_model=UploadResult)
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -66,7 +74,7 @@ async def upload_pdf(
         [
             {
                 "merchant": item["merchant"],
-                "description": item["cleaned_description"],
+                "description": _classification_context(item),
             }
             for item in new_items
         ],
@@ -96,6 +104,7 @@ async def upload_pdf(
     upload.transaction_count = imported
     mark_recurring(db, user.id)
     db.commit()
+
     return UploadResult(
         upload_id=upload.id,
         filename=file.filename,
