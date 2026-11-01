@@ -60,8 +60,9 @@ export default function Transactions() {
       const result = await api.reclassify();
       const breakdown = formatBreakdown(result.classified);
       const provider = result.llm_provider ? ` · ${result.llm_provider}` : " · LLM disabled";
+      const llmFailure = result.llm_error ? ` · LLM error: ${result.llm_error}` : "";
       setNotice(
-        `Reclassified ${result.updated} transaction${result.updated === 1 ? "" : "s"}${breakdown ? ` · ${breakdown}` : ""}${provider}`
+        `Reclassified ${result.updated} transaction${result.updated === 1 ? "" : "s"}${breakdown ? ` · ${breakdown}` : ""}${provider}${llmFailure}`
       );
       await load();
     } catch (err) {
@@ -78,11 +79,16 @@ export default function Transactions() {
           <h1>Review & correct</h1>
           <p className="muted">Corrections are saved to merchant mappings and reused next time.</p>
           {classifier && (
-            <p className="muted tiny">
-              {classifier.llm_enabled
-                ? `LLM fallback active: ${classifier.llm_provider}`
-                : "LLM fallback is disabled. Add GEMINI_API_KEY or OPENAI_API_KEY to the backend environment."}
-            </p>
+            <>
+              <p className="muted tiny">
+                {classifier.llm_enabled
+                  ? `LLM fallback active: ${classifier.llm_provider}`
+                  : "LLM fallback is disabled. Add GEMINI_API_KEY or OPENAI_API_KEY to the backend environment."}
+              </p>
+              {classifier.llm_error && (
+                <p className="error tiny">Last LLM error: {classifier.llm_error}</p>
+              )}
+            </>
           )}
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
