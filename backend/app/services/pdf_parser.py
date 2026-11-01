@@ -11,14 +11,32 @@ from dateutil import parser as date_parser
 from app.services.normalize import clean_description, detect_bank, normalize_merchant
 
 DATE_PATTERNS = [
+    re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})\b"),  # 01 Jul, 2026 or 01 Jul 2026
     re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
     re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})\b"),
     re.compile(r"\b(\d{1,2}-[A-Za-z]{3}-\d{2,4})\b"),
 ]
-AMOUNT_RE = re.compile(r"(?:INR|Rs\.?|₹)?\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})|[0-9]+\.[0-9]{1,2})")
-CREDIT_HINT = re.compile(r"\b(cr|credit|refund|cashback|interest.?rev|payment received)\b", re.I)
-DEBIT_HINT = re.compile(r"\b(dr|debit|purchase|spent|withdrawal)\b", re.I)
+AMOUNT_RE = re.compile(r"(?:INR|Rs\.?|₹)\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)")
+CREDIT_HINT = re.compile(r"\b(cr|credit|refund|cashback|interest.?rev|payment received|received from)\b", re.I)
+DEBIT_HINT = re.compile(r"\b(dr|debit|purchase|spent|withdrawal|paid to)\b", re.I)
 UPI_HINT = re.compile(r"\b(upi|vpa|@oksbi|@okhdfc|@okicici|@ybl|@apl|@paytm|phonepe|google pay|gpay)\b", re.I)
+GPAY_HINT = re.compile(r"google\s*pay|gpay|transaction statement period", re.I)
+
+# Google Pay specific patterns
+GPAY_TXN_RE = re.compile(
+    r"(?P<date>\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})"  # date
+    r".*?"
+    r"(?P<details>(?:Paid to|Received from|Self transfer to|Top-up to)[^\n₹]+)"
+    r".*?"
+    r"₹\s*(?P<amount>[0-9,]+(?:\.[0-9]{1,2})?)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+GPAY_LINE_RE = re.compile(
+    r"^(?P<details>(?:Paid to|Received from|Self transfer to|Top-up to).+?)"
+    r"\s+₹\s*(?P<amount>[0-9,]+(?:\.[0-9]{1,2})?)$",
+    re.IGNORECASE,
+)
 
 
 def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
@@ -39,7 +57,22 @@ def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
     bank_hint = detect_bank(full_text)
     inferred_source = source_type
     if source_type == "auto":
-        inferred_source = "upi" if UPI_HINT.search(full_text) else "credit_card"
+        if GPAY_HINT.search(full_text) or "google pay" in full_text.lower():
+            inferred_source = "upi"
+            bank_hint = bank_hint or "Google Pay"
+        else:
+            inferred_source = "upi" if UPI_HINT.search(full_text) else "credit_card"
+
+    # Prefer specialized GPay parser when detected
+    if bank_hint == "Google Pay" or GPAY_HINT.search(full_text):
+        parsed = _from_gpay(pages_text)
+        if len(parsed) >= 3:
+            return {
+                "bank_hint": "Google Pay",
+                "source_type": "upi",
+                "transactions": parsed,
+                "raw_preview": full_text[:2000],
+            }
 
     parsed = _from_tables(table_rows, inferred_source)
     if len(parsed) < 3:
@@ -51,6 +84,86 @@ def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
         "transactions": parsed,
         "raw_preview": full_text[:2000],
     }
+
+
+def _from_gpay(pages_text: list[str]) -> list[dict[str, Any]]:
+    """Specialized parser for Google Pay transaction statements."""
+    results: list[dict[str, Any]] = []
+    current_date: datetime | None = None
+
+    for page in pages_text:
+        lines = [ln.strip() for ln in page.splitlines() if ln.strip()]
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Try to catch a date line (e.g. "01 Jul, 2026" or "01 Jul, 2026 08:03 AM")
+            date_match = re.search(r"(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})", line)
+            if date_match:
+                try:
+                    current_date = date_parser.parse(date_match.group(1), dayfirst=True, fuzzy=True)
+                except (ValueError, OverflowError, TypeError):
+                    pass
+
+            # Look for transaction detail lines
+            detail_match = re.match(
+                r"^(Paid to|Received from|Self transfer to|Top-up to)\s+(.+)$",
+                line,
+                re.IGNORECASE,
+            )
+            if detail_match and current_date:
+                action = detail_match.group(1).strip()
+                merchant_raw = detail_match.group(2).strip()
+
+                # Amount is often on the same line or the next few lines
+                amount = None
+                amount_match = AMOUNT_RE.search(line)
+                if amount_match:
+                    amount = float(amount_match.group(1).replace(",", ""))
+                else:
+                    # look ahead a few lines for the amount
+                    for j in range(1, 4):
+                        if i + j >= len(lines):
+                            break
+                        amt_m = AMOUNT_RE.search(lines[i + j])
+                        if amt_m:
+                            amount = float(amt_m.group(1).replace(",", ""))
+                            break
+
+                if amount is None or amount <= 0:
+                    i += 1
+                    continue
+
+                # Determine direction
+                action_lower = action.lower()
+                if "received from" in action_lower:
+                    direction = "credit"
+                elif "top-up" in action_lower:
+                    # UPI Lite top-ups are internal moves – treat as debit for tracking
+                    direction = "debit"
+                else:
+                    direction = "debit"
+
+                description = f"{action} {merchant_raw}"
+                cleaned = clean_description(description)
+                merchant = normalize_merchant(merchant_raw)
+
+                results.append(
+                    {
+                        "txn_date": current_date,
+                        "amount": amount,
+                        "direction": direction,
+                        "raw_description": description[:400],
+                        "cleaned_description": cleaned,
+                        "merchant": merchant,
+                        "source": "upi",
+                    }
+                )
+
+            i += 1
+
+    return _dedupe(results)
 
 
 def _from_tables(rows: list[list[str]], source_type: str) -> list[dict[str, Any]]:
@@ -169,7 +282,6 @@ def _direction_and_amount(cells: list[str], amounts: list[float]) -> tuple[str, 
     for i, cell in enumerate(lowered):
         if "credit" in cell and i + 1 < len(amounts):
             return "credit", amounts[-1]
-    # Typical CC statements: last amount is transaction amount
     return "debit", amounts[-1]
 
 
@@ -189,7 +301,7 @@ def _looks_like_header(text: str) -> bool:
     lowered = text.lower()
     return any(
         token in lowered
-        for token in ("statement", "opening balance", "closing balance", "page no", "gstin")
+        for token in ("statement", "opening balance", "closing balance", "page no", "gstin", "transaction statement")
     )
 
 
