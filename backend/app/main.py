@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
 from app.database import Base, engine
@@ -9,7 +10,21 @@ from app.services.llm_transport import install_resilient_llm_transport
 install_resilient_llm_transport()
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="SpendSense", version="2.0.0")
+
+def _migrate_legacy_categories() -> None:
+    """Keep existing local data compatible with the cleaner category names."""
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE transactions SET category='Travel' WHERE category='Travel & Transport'")
+        )
+        connection.execute(
+            text("UPDATE merchant_mappings SET category='Travel' WHERE category='Travel & Transport'")
+        )
+
+
+_migrate_legacy_categories()
+
+app = FastAPI(title="SpendSense", version="2.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list or ["http://localhost:5173"],
