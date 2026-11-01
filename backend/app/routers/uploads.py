@@ -5,7 +5,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import Transaction, UploadedFile, User
 from app.schemas import UploadResult
-from app.services.classifier import classify_transaction, mark_recurring
+from app.services.classifier import classify_transactions, mark_recurring
 from app.services.pdf_parser import parse_statement_pdf
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -42,9 +42,8 @@ async def upload_pdf(
     db.add(upload)
     db.flush()
 
-    imported = 0
     skipped = 0
-    classified: dict[str, int] = {}
+    new_items: list[dict] = []
     for item in parsed["transactions"]:
         duplicate = (
             db.query(Transaction)
@@ -58,11 +57,23 @@ async def upload_pdf(
         )
         if duplicate:
             skipped += 1
-            continue
+        else:
+            new_items.append(item)
 
-        category, method, confidence = classify_transaction(
-            db, user.id, item["merchant"], item["cleaned_description"]
-        )
+    classifications = classify_transactions(
+        db,
+        user.id,
+        [
+            {
+                "merchant": item["merchant"],
+                "description": item["cleaned_description"],
+            }
+            for item in new_items
+        ],
+    )
+
+    classified: dict[str, int] = {}
+    for item, (category, method, confidence) in zip(new_items, classifications):
         db.add(
             Transaction(
                 user_id=user.id,
@@ -79,9 +90,9 @@ async def upload_pdf(
                 confidence=confidence,
             )
         )
-        imported += 1
         classified[method] = classified.get(method, 0) + 1
 
+    imported = len(new_items)
     upload.transaction_count = imported
     mark_recurring(db, user.id)
     db.commit()
