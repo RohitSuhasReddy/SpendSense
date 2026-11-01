@@ -4,7 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import Base, engine
 from app.routers import auth, reports, transactions, uploads
+from app.services.llm_transport import install_resilient_llm_transport
 
+install_resilient_llm_transport()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="SpendSense", version="2.0.0")
