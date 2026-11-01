@@ -11,18 +11,94 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import CATEGORIES, LlmCache, MerchantMapping, Transaction
 
+# Stronger keyword rules for Indian spending patterns
 RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("Food & Dining", ("swiggy", "zomato", "eatclub", "dominos", "pizza", "burger", "starbucks", "cafe", "restaurant", "kfc", "mcdonald", "biryani", "eatsure", "box8")),
-    ("Groceries", ("blinkit", "zepto", "instamart", "bigbasket", "dmart", "jiomart", "grocery", "supermarket", "more supermarket", "reliance fresh")),
-    ("Travel & Transport", ("uber", "ola", "rapido", "irctc", "indigo", "air india", "vistara", "makemytrip", "goibibo", "redbus", "fastag", "metro", "petrol", "indian oil", "bpcl", "hpcl")),
-    ("Shopping", ("amazon", "flipkart", "myntra", "ajio", "meesho", "nykaa", "croma", "ikea", "decathlon")),
-    ("Entertainment", ("netflix", "spotify", "prime video", "hotstar", "disney", "bookmyshow", "pvr", "inox", "youtube premium")),
-    ("Utilities & Bills", ("airtel", "jio", "vi ", "bsnl", "electricity", "bescom", "tata power", "act fibernet", "hathway", "gas", "broadband", "recharge")),
-    ("Rent / Housing", ("rent", "landlord", "housing", "nobroker", "society maintenance")),
-    ("Health", ("pharmacy", "apollo", "1mg", "pharmeasy", "netmeds", "hospital", "clinic", "practo")),
-    ("Education", ("udemy", "coursera", "unacademy", "byju", "school", "college", "tuition", "exam fee")),
-    ("Transfers (Self / Family)", ("self transfer", "own account", "family", "credited to")),
-    ("Income", ("salary", "payroll", "stipend", "refund", "cashback credited")),
+    (
+        "Food & Dining",
+        (
+            "swiggy", "zomato", "razzomato", "eatclub", "dominos", "pizza", "burger",
+            "starbucks", "cafe", "restaurant", "kfc", "mcdonald", "biryani", "eatsure",
+            "box8", "faasos", "behrouz", "ovenstory", "mojo pizza", "dunzo",
+        ),
+    ),
+    (
+        "Groceries",
+        (
+            "blinkit", "zepto", "instamart", "bigbasket", "dmart", "jiomart",
+            "grocery", "supermarket", "more supermarket", "reliance fresh",
+            "reliance retail", "ptmreliance", "nature's basket",
+        ),
+    ),
+    (
+        "Travel & Transport",
+        (
+            "uber", "ola", "rapido", "irctc", "indigo", "air india", "vistara",
+            "makemytrip", "goibibo", "redbus", "fastag", "metro", "petrol",
+            "indian oil", "bpcl", "hpcl", "fuel", "parking",
+        ),
+    ),
+    (
+        "Amazon",
+        (
+            "amazon", "asspl", "amazon seller services", "amzn", "amazon pay",
+            "amazon.in", "amazon seller",
+        ),
+    ),
+    (
+        "Shopping",
+        (
+            "flipkart", "myntra", "ajio", "meesho", "nykaa", "croma", "ikea",
+            "decathlon", "tata cliq", "snapdeal", "shopclues", "lifestyle",
+            "westside", "pantaloons", "reliance digital",
+        ),
+    ),
+    (
+        "Entertainment",
+        (
+            "netflix", "spotify", "prime video", "hotstar", "disney", "bookmyshow",
+            "book my show", "pvr", "inox", "youtube premium", "gaana", "wynk",
+            "apple music", "sonyliv", "zee5", "movie", "cinema", "tickets",
+        ),
+    ),
+    (
+        "Utilities & Bills",
+        (
+            "airtel", "jio", "vi ", "bsnl", "electricity", "bescom", "tata power",
+            "act fibernet", "hathway", "gas", "broadband", "recharge", "billdesk",
+            "bbps", "water bill", "municipal",
+        ),
+    ),
+    (
+        "Rent / Housing",
+        ("rent", "landlord", "housing", "nobroker", "society maintenance", "maintenance"),
+    ),
+    (
+        "Health",
+        (
+            "pharmacy", "apollo", "1mg", "pharmeasy", "netmeds", "hospital", "clinic",
+            "practo", "pvs pharmacy", "medplus", "wellness",
+        ),
+    ),
+    (
+        "Education",
+        ("udemy", "coursera", "unacademy", "byju", "school", "college", "tuition", "exam fee"),
+    ),
+    (
+        "Credit Card / EMI",
+        (
+            "emi", "interest on emi", "fp emi", "credit card payment", "cc payment",
+            "payment received", "infinity payment", "card payment", "min amount due",
+            "total amount due", "outstanding", "finance charge",
+        ),
+    ),
+    (
+        "Transfers (Self / Family)",
+        ("self transfer", "own account", "family", "credited to", "to self"),
+    ),
+    (
+        "Income",
+        ("salary", "payroll", "stipend", "refund", "cashback credited", "interest credited"),
+    ),
 ]
 
 
