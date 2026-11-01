@@ -1,17 +1,33 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 
+function formatBreakdown(classified = {}) {
+  return Object.entries(classified)
+    .filter(([, count]) => count)
+    .map(([method, count]) => `${method}: ${count}`)
+    .join(" · ");
+}
+
 export default function Transactions() {
   const [rows, setRows] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [classifier, setClassifier] = useState(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [month, setMonth] = useState("");
+  const [reclassifying, setReclassifying] = useState(false);
 
   async function load() {
     try {
-      const [txns, cats] = await Promise.all([api.transactions({ month }), api.categories()]);
+      const [txns, cats, classifierStatus] = await Promise.all([
+        api.transactions({ month }),
+        api.categories(),
+        api.classifierStatus(),
+      ]);
       setRows(txns);
       setCategories(cats);
+      setClassifier(classifierStatus);
+      setError("");
     } catch (err) {
       setError(err.message);
     }
@@ -22,11 +38,37 @@ export default function Transactions() {
   }, [month]);
 
   async function changeCategory(id, category) {
-    const updated = await api.updateCategory(id, category);
-    setRows((current) =>
-      current.map((row) => (row.merchant === updated.merchant ? { ...row, category: updated.category } : row))
-        .map((row) => (row.id === updated.id ? updated : row))
-    );
+    try {
+      const updated = await api.updateCategory(id, category);
+      setRows((current) =>
+        current
+          .map((row) =>
+            row.merchant === updated.merchant ? { ...row, category: updated.category } : row
+          )
+          .map((row) => (row.id === updated.id ? updated : row))
+      );
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function reclassifyAll() {
+    setReclassifying(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api.reclassify();
+      const breakdown = formatBreakdown(result.classified);
+      const provider = result.llm_provider ? ` · ${result.llm_provider}` : " · LLM disabled";
+      setNotice(
+        `Reclassified ${result.updated} transaction${result.updated === 1 ? "" : "s"}${breakdown ? ` · ${breakdown}` : ""}${provider}`
+      );
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setReclassifying(false);
+    }
   }
 
   return (
@@ -35,10 +77,25 @@ export default function Transactions() {
         <div>
           <h1>Review & correct</h1>
           <p className="muted">Corrections are saved to merchant mappings and reused next time.</p>
+          {classifier && (
+            <p className="muted tiny">
+              {classifier.llm_enabled
+                ? `LLM fallback active: ${classifier.llm_provider}`
+                : "LLM fallback is disabled. Add GEMINI_API_KEY or OPENAI_API_KEY to the backend environment."}
+            </p>
+          )}
         </div>
-        <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button type="button" onClick={reclassifyAll} disabled={reclassifying}>
+            {reclassifying ? "Reclassifying…" : "Reclassify"}
+          </button>
+          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+        </div>
       </div>
+
       {error && <div className="error">{error}</div>}
+      {notice && <div className="success" style={{ marginBottom: 14 }}>{notice}</div>}
+
       <div className="card table-wrap">
         <table>
           <thead>
