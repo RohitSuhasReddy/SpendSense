@@ -3,9 +3,9 @@
   --bg: #050505;
   --panel: #0c0c0c;
   --panel-2: #111111;
-  --line: #1f1f1f;
+  --line: #1c1c1c;
   --text: #f0f0f0;
-  --muted: #888888;
+  --muted: #8a8a8a;
   --accent: #38bdf8;
   --accent-soft: rgba(56, 189, 248, 0.12);
   --danger: #f87171;
@@ -23,34 +23,42 @@ html, body, #root {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 250px 1fr;
   min-height: 100vh;
 }
 
 aside {
-  padding: 28px 20px;
+  padding: 28px 16px;
   border-right: 1px solid var(--line);
-  background: #080808;
+  background: linear-gradient(180deg, #0a0a0a 0%, #070707 100%);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .brand {
   font-size: 22px;
   font-weight: 700;
-  letter-spacing: -0.3px;
-  background: linear-gradient(135deg, #38bdf8, #a78bfa);
+  letter-spacing: -0.4px;
+  padding: 0 10px;
+  background: linear-gradient(135deg, #38bdf8, #818cf8);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
+aside > .muted {
+  padding: 0 10px;
+  margin: 2px 0 8px;
+  font-size: 12px;
+}
+
 nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 28px;
+  gap: 4px;
+  margin-top: 20px;
+  padding: 0 4px;
 }
 
 .nav-link,
@@ -68,15 +76,16 @@ button,
 }
 
 .nav-link:hover {
-  background: var(--panel-2);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
 }
 
 .nav-link.active {
   background: var(--accent-soft);
   color: var(--accent);
-  border-color: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.2);
   font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.08);
 }
 
 button[type="submit"],
@@ -86,15 +95,17 @@ button[type="submit"],
   font-weight: 600;
   border: none;
   text-align: center;
+  border-radius: 10px;
+  padding: 11px 16px;
 }
 
 button[type="submit"]:hover,
 .page-head button:hover {
-  filter: brightness(1.1);
+  filter: brightness(1.08);
 }
 
 button[type="submit"]:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -108,14 +119,20 @@ button[type="submit"]:disabled {
 .ghost:hover {
   border-color: #333;
   color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .sidebar-footer {
   margin-top: auto;
   display: grid;
-  gap: 6px;
-  padding-top: 16px;
+  gap: 4px;
+  padding: 16px 10px 4px;
   border-top: 1px solid var(--line);
+}
+
+.sidebar-footer > div:first-child {
+  font-weight: 500;
+  font-size: 14px;
 }
 
 main {
@@ -138,12 +155,12 @@ h1 {
   margin: 0 0 6px;
   font-size: 26px;
   font-weight: 700;
-  letter-spacing: -0.4px;
+  letter-spacing: -0.5px;
 }
 
 h2 {
   margin: 0 0 12px;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text);
 }

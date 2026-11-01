@@ -11,30 +11,39 @@ from dateutil import parser as date_parser
 from app.services.normalize import clean_description, detect_bank, normalize_merchant
 
 DATE_PATTERNS = [
-    re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})\b"),  # 01 Jul, 2026 or 01 Jul 2026
+    re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})\b"),
     re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
     re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})\b"),
     re.compile(r"\b(\d{1,2}-[A-Za-z]{3}-\d{2,4})\b"),
 ]
-AMOUNT_RE = re.compile(r"(?:INR|Rs\.?|₹)\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)")
-CREDIT_HINT = re.compile(r"\b(cr|credit|refund|cashback|interest.?rev|payment received|received from)\b", re.I)
+AMOUNT_RE = re.compile(
+    r"(?:INR|Rs\.?|₹)\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)"
+)
+CREDIT_HINT = re.compile(
+    r"\b(cr|credit|refund|cashback|interest.?rev|payment received|received from)\b", re.I
+)
 DEBIT_HINT = re.compile(r"\b(dr|debit|purchase|spent|withdrawal|paid to)\b", re.I)
-UPI_HINT = re.compile(r"\b(upi|vpa|@oksbi|@okhdfc|@okicici|@ybl|@apl|@paytm|phonepe|google pay|gpay)\b", re.I)
-GPAY_HINT = re.compile(r"google\s*pay|gpay|transaction statement period", re.I)
+UPI_HINT = re.compile(
+    r"\b(upi|vpa|@oksbi|@okhdfc|@okicici|@ybl|@apl|@paytm|phonepe|google pay|gpay)\b", re.I
+)
+GPAY_HINT = re.compile(r"google\s*pay|gpay|transaction statement period|powered by\s*upi", re.I)
 
-# Google Pay specific patterns
-GPAY_TXN_RE = re.compile(
-    r"(?P<date>\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})"  # date
-    r".*?"
-    r"(?P<details>(?:Paid to|Received from|Self transfer to|Top-up to)[^\n₹]+)"
-    r".*?"
+# Flexible patterns that work even when pdfplumber jumbles columns
+GPAY_BLOCK_RE = re.compile(
+    r"(?P<date>\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})"
+    r"[\s\S]{0,80}?"
+    r"(?P<action>Paid to|Received from|Self transfer to|Top-up to)\s+"
+    r"(?P<merchant>[A-Za-z0-9][A-Za-z0-9 &.'\-]{1,80}?)"
+    r"[\s\S]{0,60}?"
     r"₹\s*(?P<amount>[0-9,]+(?:\.[0-9]{1,2})?)",
-    re.IGNORECASE | re.DOTALL,
+    re.IGNORECASE,
 )
 
-GPAY_LINE_RE = re.compile(
-    r"^(?P<details>(?:Paid to|Received from|Self transfer to|Top-up to).+?)"
-    r"\s+₹\s*(?P<amount>[0-9,]+(?:\.[0-9]{1,2})?)$",
+GPAY_SIMPLE_RE = re.compile(
+    r"(?P<action>Paid to|Received from|Self transfer to|Top-up to)\s+"
+    r"(?P<merchant>[A-Za-z0-9][A-Za-z0-9 &.'\-]{1,60}?)"
+    r".{0,40}?"
+    r"₹\s*(?P<amount>[0-9,]+(?:\.[0-9]{1,2})?)",
     re.IGNORECASE,
 )
 
@@ -45,7 +54,9 @@ def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
 
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for page in pdf.pages:
-            pages_text.append(page.extract_text() or "")
+            # Try normal extract + also a slightly different layout
+            text = page.extract_text() or ""
+            pages_text.append(text)
             tables = page.extract_tables() or []
             for table in tables:
                 for row in table:
@@ -56,24 +67,32 @@ def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
     full_text = "\n".join(pages_text)
     bank_hint = detect_bank(full_text)
     inferred_source = source_type
+
+    is_gpay = bool(
+        GPAY_HINT.search(full_text)
+        or "google pay" in full_text.lower()
+        or "transaction statement period" in full_text.lower()
+    )
+
     if source_type == "auto":
-        if GPAY_HINT.search(full_text) or "google pay" in full_text.lower():
+        if is_gpay:
             inferred_source = "upi"
             bank_hint = bank_hint or "Google Pay"
         else:
             inferred_source = "upi" if UPI_HINT.search(full_text) else "credit_card"
 
-    # Prefer specialized GPay parser when detected
-    if bank_hint == "Google Pay" or GPAY_HINT.search(full_text):
-        parsed = _from_gpay(pages_text)
-        if len(parsed) >= 3:
+    # --- GPay specialized path ---
+    if is_gpay or bank_hint == "Google Pay":
+        parsed = _from_gpay_aggressive(full_text, pages_text)
+        if len(parsed) >= 2:
             return {
                 "bank_hint": "Google Pay",
                 "source_type": "upi",
                 "transactions": parsed,
-                "raw_preview": full_text[:2000],
+                "raw_preview": full_text[:2500],
             }
 
+    # Fallback generic paths
     parsed = _from_tables(table_rows, inferred_source)
     if len(parsed) < 3:
         parsed = _from_lines(pages_text, inferred_source)
@@ -82,86 +101,174 @@ def parse_statement_pdf(content: bytes, source_type: str) -> dict[str, Any]:
         "bank_hint": bank_hint,
         "source_type": inferred_source,
         "transactions": parsed,
-        "raw_preview": full_text[:2000],
+        "raw_preview": full_text[:2500],
     }
 
 
-def _from_gpay(pages_text: list[str]) -> list[dict[str, Any]]:
-    """Specialized parser for Google Pay transaction statements."""
+def _from_gpay_aggressive(full_text: str, pages_text: list[str]) -> list[dict[str, Any]]:
+    """Very tolerant parser for Google Pay PDFs."""
     results: list[dict[str, Any]] = []
+
+    # Strategy 1: block regex on whole document
+    for match in GPAY_BLOCK_RE.finditer(full_text):
+        try:
+            txn_date = date_parser.parse(match.group("date"), dayfirst=True, fuzzy=True)
+            amount = float(match.group("amount").replace(",", ""))
+            action = match.group("action").strip()
+            merchant_raw = match.group("merchant").strip()
+            # Clean trailing noise that sometimes gets captured
+            merchant_raw = re.sub(r"\s+(UPI|Paid by|Transaction).*$", "", merchant_raw, flags=re.I).strip()
+
+            if amount <= 0 or len(merchant_raw) < 2:
+                continue
+
+            direction = "credit" if "received from" in action.lower() else "debit"
+            description = f"{action} {merchant_raw}"
+
+            results.append(
+                {
+                    "txn_date": txn_date,
+                    "amount": amount,
+                    "direction": direction,
+                    "raw_description": description[:400],
+                    "cleaned_description": clean_description(description),
+                    "merchant": normalize_merchant(merchant_raw),
+                    "source": "upi",
+                }
+            )
+        except Exception:
+            continue
+
+    if len(results) >= 3:
+        return _dedupe(results)
+
+    # Strategy 2: line-by-line with carried date
+    results = []
     current_date: datetime | None = None
 
     for page in pages_text:
-        lines = [ln.strip() for ln in page.splitlines() if ln.strip()]
+        # Normalize whitespace but keep line structure
+        raw_lines = page.splitlines()
+        lines = []
+        for ln in raw_lines:
+            cleaned = " ".join(ln.split())
+            if cleaned:
+                lines.append(cleaned)
 
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-
-            # Try to catch a date line (e.g. "01 Jul, 2026" or "01 Jul, 2026 08:03 AM")
-            date_match = re.search(r"(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})", line)
-            if date_match:
+        for i, line in enumerate(lines):
+            # Date detection
+            dm = re.search(r"(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})", line)
+            if dm:
                 try:
-                    current_date = date_parser.parse(date_match.group(1), dayfirst=True, fuzzy=True)
-                except (ValueError, OverflowError, TypeError):
+                    current_date = date_parser.parse(dm.group(1), dayfirst=True, fuzzy=True)
+                except Exception:
                     pass
 
-            # Look for transaction detail lines
-            detail_match = re.match(
-                r"^(Paid to|Received from|Self transfer to|Top-up to)\s+(.+)$",
+            # Action + merchant
+            am = re.search(
+                r"(Paid to|Received from|Self transfer to|Top-up to)\s+(.+)",
                 line,
                 re.IGNORECASE,
             )
-            if detail_match and current_date:
-                action = detail_match.group(1).strip()
-                merchant_raw = detail_match.group(2).strip()
+            if not am or not current_date:
+                continue
 
-                # Amount is often on the same line or the next few lines
-                amount = None
-                amount_match = AMOUNT_RE.search(line)
-                if amount_match:
-                    amount = float(amount_match.group(1).replace(",", ""))
-                else:
-                    # look ahead a few lines for the amount
-                    for j in range(1, 4):
-                        if i + j >= len(lines):
-                            break
-                        amt_m = AMOUNT_RE.search(lines[i + j])
-                        if amt_m:
-                            amount = float(amt_m.group(1).replace(",", ""))
-                            break
+            action = am.group(1).strip()
+            rest = am.group(2).strip()
 
-                if amount is None or amount <= 0:
-                    i += 1
+            # Amount may be on this line or next 1-3 lines
+            amount = None
+            amount_m = AMOUNT_RE.search(line)
+            if amount_m:
+                amount = float(amount_m.group(1).replace(",", ""))
+            else:
+                for j in range(1, 4):
+                    if i + j >= len(lines):
+                        break
+                    amount_m = AMOUNT_RE.search(lines[i + j])
+                    if amount_m:
+                        amount = float(amount_m.group(1).replace(",", ""))
+                        break
+
+            if amount is None or amount <= 0:
+                continue
+
+            # Clean merchant name (remove amount / UPI id noise)
+            merchant_raw = AMOUNT_RE.sub("", rest).strip()
+            merchant_raw = re.sub(r"UPI Transaction ID:.*", "", merchant_raw, flags=re.I).strip()
+            merchant_raw = re.sub(r"Paid by.*", "", merchant_raw, flags=re.I).strip()
+            merchant_raw = re.sub(r"\s{2,}", " ", merchant_raw).strip(" -,")
+
+            if len(merchant_raw) < 2:
+                continue
+
+            direction = "credit" if "received from" in action.lower() else "debit"
+            description = f"{action} {merchant_raw}"
+
+            results.append(
+                {
+                    "txn_date": current_date,
+                    "amount": amount,
+                    "direction": direction,
+                    "raw_description": description[:400],
+                    "cleaned_description": clean_description(description),
+                    "merchant": normalize_merchant(merchant_raw),
+                    "source": "upi",
+                }
+            )
+
+    if len(results) >= 2:
+        return _dedupe(results)
+
+    # Strategy 3: simple action+amount pairs, date from nearest previous date
+    results = []
+    current_date = None
+    for page in pages_text:
+        text = page
+        # Find all dates in order
+        date_positions = [
+            (m.start(), date_parser.parse(m.group(1), dayfirst=True, fuzzy=True))
+            for m in re.finditer(r"(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})", text)
+        ]
+
+        for m in GPAY_SIMPLE_RE.finditer(text):
+            try:
+                # Find the closest previous date
+                pos = m.start()
+                txn_date = None
+                for dpos, dval in reversed(date_positions):
+                    if dpos <= pos:
+                        txn_date = dval
+                        break
+                if not txn_date and date_positions:
+                    txn_date = date_positions[0][1]
+                if not txn_date:
                     continue
 
-                # Determine direction
-                action_lower = action.lower()
-                if "received from" in action_lower:
-                    direction = "credit"
-                elif "top-up" in action_lower:
-                    # UPI Lite top-ups are internal moves – treat as debit for tracking
-                    direction = "debit"
-                else:
-                    direction = "debit"
+                amount = float(m.group("amount").replace(",", ""))
+                action = m.group("action").strip()
+                merchant_raw = m.group("merchant").strip()
+                merchant_raw = re.sub(r"\s+(UPI|Paid by|Transaction).*$", "", merchant_raw, flags=re.I).strip()
 
+                if amount <= 0 or len(merchant_raw) < 2:
+                    continue
+
+                direction = "credit" if "received from" in action.lower() else "debit"
                 description = f"{action} {merchant_raw}"
-                cleaned = clean_description(description)
-                merchant = normalize_merchant(merchant_raw)
 
                 results.append(
                     {
-                        "txn_date": current_date,
+                        "txn_date": txn_date,
                         "amount": amount,
                         "direction": direction,
                         "raw_description": description[:400],
-                        "cleaned_description": cleaned,
-                        "merchant": merchant,
+                        "cleaned_description": clean_description(description),
+                        "merchant": normalize_merchant(merchant_raw),
                         "source": "upi",
                     }
                 )
-
-            i += 1
+            except Exception:
+                continue
 
     return _dedupe(results)
 
@@ -301,7 +408,16 @@ def _looks_like_header(text: str) -> bool:
     lowered = text.lower()
     return any(
         token in lowered
-        for token in ("statement", "opening balance", "closing balance", "page no", "gstin", "transaction statement")
+        for token in (
+            "statement",
+            "opening balance",
+            "closing balance",
+            "page no",
+            "gstin",
+            "transaction statement",
+            "date & time",
+            "transaction details",
+        )
     )
 
 
