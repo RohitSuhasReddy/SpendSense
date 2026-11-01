@@ -19,9 +19,9 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
         "Food & Dining",
         (
             "swiggy", "zomato", "razzomato", "eatclub", "dominos", "domino's",
-            "jubilant foodworks", "jubilantfoodworks", "bundl technologies",
-            "spices n chefs", "spices and chefs", "vendx", "vending machine",
-            "hotel sri akshaya", "restaurant", "cafe", "coffee", "bakery",
+            "jubilant foodworks", "jubilantfoodworks", "bundl technologies", "bundltechnologies", "bundl",
+            "spices n chefs", "spices and chefs", "spicesnchefs", "vendx", "vending machine",
+            "hotel sri akshaya", "hotelsriakshaya", "restaurant", "cafe", "coffee", "bakery",
             "pizza", "burger", "kfc", "mcdonald", "biryani", "eatsure",
             "box8", "faasos", "behrouz", "ovenstory", "mojo pizza", "starbucks",
         ),
@@ -29,10 +29,10 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
     (
         "Groceries",
         (
-            "amazon pay groceries", "groceries", "grocery", "blinkit", "zepto",
+            "amazon pay groceries", "amazonpaygroceries", "groceries", "grocery", "blinkit", "zepto",
             "instamart", "bigbasket", "dmart", "jiomart", "supermarket",
-            "super market", "vijetha", "kirana", "general stores", "food store",
-            "meat shop", "chicken and fish", "chicken & fish", "reliance fresh",
+            "super market", "vijetha", "kirana", "general stores", "generalstores", "food store", "foodstore",
+            "meat shop", "meatshop", "fish shop", "fishshop", "chicken and fish", "chicken & fish", "reliance fresh",
             "more supermarket", "nature's basket",
         ),
     ),
@@ -130,10 +130,8 @@ def classify_transactions(
       1) personal mappings
       2) deterministic rules
       3) cached LLM result
-      4) one batched LLM request for unresolved merchants
+      4) batched LLM requests for unresolved merchants
       5) fallback to Others
-
-    The batched LLM step avoids dozens of serial API calls for a GPay statement.
     """
     items = [
         {
@@ -199,7 +197,6 @@ def classify_transactions(
 
 
 def active_llm_provider() -> str | None:
-    """Return the provider/model that will be attempted first, if any key is configured."""
     preferred = (settings.llm_provider or "").strip().lower()
     if preferred == "openai" and settings.openai_api_key:
         return f"OpenAI · {settings.openai_model}"
@@ -292,6 +289,16 @@ def _from_llm_batch(
     if not pending:
         return {}
 
+    results: dict[str, str] = {}
+    for start in range(0, len(pending), 35):
+        chunk = pending[start : start + 35]
+        results.update(_classify_llm_chunk(chunk))
+    return results
+
+
+def _classify_llm_chunk(
+    pending: list[tuple[str, tuple[str, str]]],
+) -> dict[str, str]:
     preferred = (settings.llm_provider or "").strip().lower()
     providers: list[str] = []
     if preferred in {"gemini", "openai"}:
@@ -312,16 +319,26 @@ def _from_llm_batch(
     return {}
 
 
-def _batch_prompt(pending: list[tuple[str, tuple[str, str]]]) -> str:
+def _batch_payload(
+    pending: list[tuple[str, tuple[str, str]]],
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    id_to_key: dict[str, str] = {}
+    rows: list[dict[str, str]] = []
+    for index, (key, (merchant, description)) in enumerate(pending):
+        short_id = str(index)
+        id_to_key[short_id] = key
+        rows.append(
+            {
+                "id": short_id,
+                "merchant": merchant,
+                "description": description,
+            }
+        )
+    return rows, id_to_key
+
+
+def _batch_prompt(rows: list[dict[str, str]]) -> str:
     cats = ", ".join(CATEGORIES)
-    rows = [
-        {
-            "id": key,
-            "merchant": merchant,
-            "description": description,
-        }
-        for key, (merchant, description) in pending
-    ]
     return (
         "You classify Indian personal-finance transactions from UPI and credit-card statements. "
         "Use real-world merchant knowledge when helpful (brand names, parent companies, restaurant chains, "
@@ -330,12 +347,12 @@ def _batch_prompt(pending: list[tuple[str, tuple[str, str]]]) -> str:
         "use Others unless the text clearly indicates a transfer. "
         f"Choose exactly one category for every row from: {cats}. "
         "Return ONLY a JSON array. Each element must be "
-        '{"id":"the exact input id","category":"one allowed category"}. '
+        '{"id":"the exact short input id","category":"one allowed category"}. '
         f"Rows: {json.dumps(rows, ensure_ascii=False)}"
     )
 
 
-def _parse_batch_categories(text: str, valid_keys: set[str]) -> dict[str, str]:
+def _parse_batch_categories(text: str, id_to_key: dict[str, str]) -> dict[str, str]:
     cleaned = (text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -359,9 +376,10 @@ def _parse_batch_categories(text: str, valid_keys: set[str]) -> dict[str, str]:
     for item in data:
         if not isinstance(item, dict):
             continue
-        key = str(item.get("id", ""))
+        short_id = str(item.get("id", ""))
         category = item.get("category")
-        if key in valid_keys and category in CATEGORIES:
+        key = id_to_key.get(short_id)
+        if key and category in CATEGORIES:
             parsed[key] = category
     return parsed
 
@@ -369,12 +387,13 @@ def _parse_batch_categories(text: str, valid_keys: set[str]) -> dict[str, str]:
 def _gemini_classify_batch(
     pending: list[tuple[str, tuple[str, str]]],
 ) -> dict[str, str]:
+    rows, id_to_key = _batch_payload(pending)
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
     )
     payload = {
-        "contents": [{"parts": [{"text": _batch_prompt(pending)}]}],
+        "contents": [{"parts": [{"text": _batch_prompt(rows)}]}],
         "generationConfig": {
             "temperature": 0,
             "responseMimeType": "application/json",
@@ -384,7 +403,7 @@ def _gemini_classify_batch(
         response = httpx.post(url, json=payload, timeout=30)
         response.raise_for_status()
         text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return _parse_batch_categories(text, {key for key, _ in pending})
+        return _parse_batch_categories(text, id_to_key)
     except Exception:
         return {}
 
@@ -392,6 +411,7 @@ def _gemini_classify_batch(
 def _openai_classify_batch(
     pending: list[tuple[str, tuple[str, str]]],
 ) -> dict[str, str]:
+    rows, id_to_key = _batch_payload(pending)
     try:
         response = httpx.post(
             "https://api.openai.com/v1/responses",
@@ -401,7 +421,7 @@ def _openai_classify_batch(
             },
             json={
                 "model": settings.openai_model,
-                "input": _batch_prompt(pending),
+                "input": _batch_prompt(rows),
                 "temperature": 0,
                 "max_output_tokens": 5000,
             },
@@ -414,6 +434,6 @@ def _openai_classify_batch(
             for content in output.get("content", []):
                 if content.get("type") == "output_text" and content.get("text"):
                     chunks.append(content["text"])
-        return _parse_batch_categories("\n".join(chunks), {key for key, _ in pending})
+        return _parse_batch_categories("\n".join(chunks), id_to_key)
     except Exception:
         return {}
