@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.config import settings
+from app.models import CATEGORIES
 
 _LAST_LLM_ERROR = ""
 
@@ -77,9 +80,86 @@ def _from_llm_batch_fast(
     return classifier._classify_llm_chunk(pending)
 
 
-def install_resilient_llm_transport() -> None:
-    """Install the fast Gemini transport without changing the classifier's public API."""
+def _contextual_batch_prompt(rows: list[dict[str, str]]) -> str:
+    categories = ", ".join(CATEGORIES)
+    return (
+        "Classify Indian personal-finance transactions. Context can include merchant/payee, amount, "
+        "payment source and time. Use real-world merchant knowledge and parent-company knowledge. "
+        "Travel includes cab, taxi, auto-rickshaw, driver and ride payments. Food & Dining includes "
+        "restaurants and food-delivery/COD rider payments when the context supports it. Salon & Personal Care "
+        "includes salons, barbers, haircuts, grooming and beauty services. For a plain person's name with weak "
+        "evidence, use amount/time only as weak clues and do not invent a merchant identity. "
+        f"Choose exactly one category for every row from: {categories}. "
+        "Return ONLY a JSON array. Each element must be "
+        '{"id":"the exact short input id","category":"one allowed category"}. '
+        f"Rows: {json.dumps(rows, ensure_ascii=False)}"
+    )
+
+
+def _install_category_rules() -> None:
     from app.services import classifier
 
+    normalized_rules: list[tuple[str, tuple[str, ...]]] = []
+    for category, keywords in classifier.RULES:
+        if category == "Travel & Transport":
+            category = "Travel"
+        normalized_rules.append((category, keywords))
+
+    normalized_rules.insert(
+        0,
+        (
+            "Salon & Personal Care",
+            (
+                "salon",
+                "saloon",
+                "barber",
+                "haircut",
+                "hair cut",
+                "grooming",
+                "beauty parlour",
+                "beauty parlor",
+                "naturals salon",
+                "green trends",
+                "jawed habib",
+                "toni and guy",
+                "toni & guy",
+                "lakme salon",
+                "bounce salon",
+            ),
+        ),
+    )
+    normalized_rules.insert(
+        1,
+        (
+            "Travel",
+            (
+                "namma yatri",
+                "nammayatri",
+                "cab driver",
+                "auto driver",
+                "taxi driver",
+                "driver payment",
+                "auto rickshaw",
+                "rickshaw",
+                "taxi",
+                "cab",
+                "rapido captain",
+            ),
+        ),
+    )
+    classifier.RULES = normalized_rules
+
+
+def _cache_key_v3(merchant: str, description: str) -> str:
+    return f"v3|{merchant}|{description[:80]}"[:255]
+
+
+def install_resilient_llm_transport() -> None:
+    """Install SpendSense category rules and the fast Gemini transport."""
+    from app.services import classifier
+
+    _install_category_rules()
+    classifier._batch_prompt = _contextual_batch_prompt
+    classifier._cache_key = _cache_key_v3
     classifier._gemini_classify_batch = _gemini_classify_batch_fast
     classifier._from_llm_batch = _from_llm_batch_fast
