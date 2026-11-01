@@ -1,0 +1,150 @@
+.dashboard-page {
+  --dash-accent: #71869a;
+  --dash-accent-strong: #5e7387;
+  --dash-border: rgba(148, 163, 184, 0.18);
+}
+
+.dashboard-head {
+  align-items: flex-end;
+}
+
+.dashboard-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.month-control {
+  min-width: 180px;
+  margin: 0;
+}
+
+.month-control span,
+.custom-date-grid label span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8994a3;
+}
+
+.dashboard-page .export-button,
+.dashboard-page .download-button {
+  background: #71869a;
+  color: #f8fafc;
+  border: 1px solid #8195a8;
+  box-shadow: none;
+  font-weight: 700;
+}
+
+.dashboard-page .export-button:hover,
+.dashboard-page .download-button:hover:not(:disabled) {
+  background: #7b8fa2;
+  filter: none;
+}
+
+.export-panel {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(210px, 0.7fr) auto;
+  gap: 16px;
+  align-items: end;
+  margin-bottom: 18px;
+  border-color: var(--dash-border);
+  background: linear-gradient(180deg, rgba(19, 24, 31, 0.96), rgba(14, 18, 24, 0.96));
+}
+
+.export-panel p {
+  margin: 5px 0 0;
+}
+
+.export-panel select {
+  margin: 0;
+}
+
+.custom-date-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 260px));
+  gap: 12px;
+}
+
+.custom-date-grid label {
+  margin: 0;
+}
+
+.dashboard-error {
+  margin-bottom: 16px;
+}
+
+.dashboard-page .stats .card {
+  border-color: var(--dash-border);
+}
+
+.dashboard-page .stats .card::after {
+  background: rgba(113, 134, 154, 0.05);
+}
+
+.dashboard-page .stats .card:hover {
+  border-color: rgba(113, 134, 154, 0.32);
+}
+
+.chart-card-wide {
+  min-height: 390px;
+  margin-bottom: 16px;
+}
+
+.chart-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.chart-heading h2 {
+  margin-bottom: 2px;
+}
+
+.chart-heading p {
+  margin: 0;
+}
+
+.dashboard-charts {
+  align-items: stretch;
+}
+
+.dashboard-page .chart-card {
+  border-color: var(--dash-border);
+  background: linear-gradient(180deg, rgba(18, 23, 30, 0.96), rgba(13, 17, 23, 0.96));
+}
+
+.dashboard-page .recharts-legend-item-text {
+  color: #a7b0bb !important;
+}
+
+@media (max-width: 900px) {
+  .dashboard-head {
+    align-items: stretch;
+  }
+
+  .dashboard-actions {
+    justify-content: stretch;
+  }
+
+  .month-control {
+    flex: 1 1 180px;
+  }
+
+  .dashboard-page .export-button {
+    flex: 1 1 160px;
+  }
+
+  .export-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .custom-date-grid {
+    grid-template-columns: 1fr;
+  }
+}
