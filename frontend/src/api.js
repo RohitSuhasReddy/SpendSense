@@ -26,6 +26,7 @@ async function request(path, options = {}) {
   if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
+
   const response = await fetch(`${API}${path}`, { ...options, headers });
   if (response.status === 401) {
     clearSession();
@@ -46,12 +47,20 @@ async function request(path, options = {}) {
   return response;
 }
 
+function queryString(params = {}) {
+  return new URLSearchParams(
+    Object.fromEntries(
+      Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+    )
+  ).toString();
+}
+
 export const api = {
   register: (payload) => request("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
   login: (payload) => request("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
-  dashboard: () => request("/api/reports/dashboard"),
+  dashboard: (month) => request(`/api/reports/dashboard${month ? `?month=${encodeURIComponent(month)}` : ""}`),
   transactions: (params = {}) => {
-    const query = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v))).toString();
+    const query = queryString(params);
     return request(`/api/transactions${query ? `?${query}` : ""}`);
   },
   categories: () => request("/api/transactions/categories"),
@@ -65,5 +74,8 @@ export const api = {
     body.append("source_type", sourceType);
     return request("/api/uploads/pdf", { method: "POST", body });
   },
-  exportUrl: `${API}/api/reports/export.xlsx`,
+  exportUrl: (params = {}) => {
+    const query = queryString(params);
+    return `${API}/api/reports/export.xlsx${query ? `?${query}` : ""}`;
+  },
 };
