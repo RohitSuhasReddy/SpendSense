@@ -175,12 +175,6 @@ export default function UploadPage() {
           </div>
         )}
       </form>
-
-      <div className="upload-features">
-        <div><strong>Auto-detect</strong><span>GPay vs credit card</span></div>
-        <div><strong>Deduplicate</strong><span>Safe monthly re-imports</span></div>
-        <div><strong>Cleaner spend</strong><span>UPI Lite top-ups are ignored</span></div>
-      </div>
     </section>
   );
 }
