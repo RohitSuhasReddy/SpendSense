@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     openai_api_key: str = ""
     llm_provider: str = "gemini"
-    gemini_model: str = "gemini-3.8-flash"
+    # Flash-Lite is optimized for low-latency, high-volume classification.
+    gemini_model: str = "gemini-3.5-flash-lite"
     openai_model: str = "gpt-6-luna"
     access_token_expire_minutes: int = 60 * 24 * 7
 
