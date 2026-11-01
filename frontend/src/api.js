@@ -55,6 +55,8 @@ export const api = {
     return request(`/api/transactions${query ? `?${query}` : ""}`);
   },
   categories: () => request("/api/transactions/categories"),
+  classifierStatus: () => request("/api/transactions/classifier-status"),
+  reclassify: () => request("/api/transactions/reclassify", { method: "POST" }),
   updateCategory: (id, category) =>
     request(`/api/transactions/${id}`, { method: "PATCH", body: JSON.stringify({ category }) }),
   uploadPdf: (file, sourceType) => {
