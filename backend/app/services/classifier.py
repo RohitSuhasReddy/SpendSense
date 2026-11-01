@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from typing import Iterable
 
 import httpx
 from rapidfuzz import fuzz
@@ -11,22 +12,28 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import CATEGORIES, LlmCache, MerchantMapping, Transaction
 
-# Stronger keyword rules for Indian spending patterns
+# Deterministic rules handle merchants we can recognize confidently.
+# LLM is reserved for genuinely unclear UPI names that remain.
 RULES: list[tuple[str, tuple[str, ...]]] = [
     (
         "Food & Dining",
         (
-            "swiggy", "zomato", "razzomato", "eatclub", "dominos", "pizza", "burger",
-            "starbucks", "cafe", "restaurant", "kfc", "mcdonald", "biryani", "eatsure",
-            "box8", "faasos", "behrouz", "ovenstory", "mojo pizza", "dunzo",
+            "swiggy", "zomato", "razzomato", "eatclub", "dominos", "domino's",
+            "jubilant foodworks", "jubilantfoodworks", "bundl technologies",
+            "spices n chefs", "spices and chefs", "vendx", "vending machine",
+            "hotel sri akshaya", "restaurant", "cafe", "coffee", "bakery",
+            "pizza", "burger", "kfc", "mcdonald", "biryani", "eatsure",
+            "box8", "faasos", "behrouz", "ovenstory", "mojo pizza", "starbucks",
         ),
     ),
     (
         "Groceries",
         (
-            "blinkit", "zepto", "instamart", "bigbasket", "dmart", "jiomart",
-            "grocery", "supermarket", "more supermarket", "reliance fresh",
-            "reliance retail", "ptmreliance", "nature's basket",
+            "amazon pay groceries", "groceries", "grocery", "blinkit", "zepto",
+            "instamart", "bigbasket", "dmart", "jiomart", "supermarket",
+            "super market", "vijetha", "kirana", "general stores", "food store",
+            "meat shop", "chicken and fish", "chicken & fish", "reliance fresh",
+            "more supermarket", "nature's basket",
         ),
     ),
     (
@@ -40,8 +47,8 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
     (
         "Amazon",
         (
-            "amazon", "asspl", "amazon seller services", "amzn", "amazon pay",
-            "amazon.in", "amazon seller",
+            "amazon seller services", "amazon.in", "amazon seller", "asspl",
+            "amzn", "amazon pay", "amazon",
         ),
     ),
     (
@@ -57,15 +64,15 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
         (
             "netflix", "spotify", "prime video", "hotstar", "disney", "bookmyshow",
             "book my show", "pvr", "inox", "youtube premium", "gaana", "wynk",
-            "apple music", "sonyliv", "zee5", "movie", "cinema", "tickets",
+            "apple music", "sonyliv", "zee5", "movie", "cinema", "fancode",
         ),
     ),
     (
         "Utilities & Bills",
         (
             "airtel", "jio", "vi ", "bsnl", "electricity", "bescom", "tata power",
-            "act fibernet", "hathway", "gas", "broadband", "recharge", "billdesk",
-            "bbps", "water bill", "municipal",
+            "act fibernet", "hathway", "gas bill", "broadband", "recharge",
+            "billdesk", "bbps", "water bill", "municipal",
         ),
     ),
     (
@@ -75,8 +82,8 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
     (
         "Health",
         (
-            "pharmacy", "apollo", "1mg", "pharmeasy", "netmeds", "hospital", "clinic",
-            "practo", "pvs pharmacy", "medplus", "wellness",
+            "pharmacy", "apollo", "1mg", "pharmeasy", "netmeds", "hospital",
+            "clinic", "practo", "medplus", "wellness",
         ),
     ),
     (
@@ -97,25 +104,112 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
     ),
     (
         "Income",
-        ("salary", "payroll", "stipend", "refund", "cashback credited", "interest credited"),
+        ("salary", "payroll", "stipend", "cashback credited", "interest credited"),
     ),
 ]
 
 
-def classify_transaction(db: Session, user_id: int, merchant: str, description: str) -> tuple[str, str, float]:
-    mapped = _from_mapping(db, user_id, merchant)
-    if mapped:
-        return mapped, "mapping", 0.99
+def classify_transaction(
+    db: Session, user_id: int, merchant: str, description: str
+) -> tuple[str, str, float]:
+    """Classify one transaction. Batch classification is preferred for imports."""
+    return classify_transactions(
+        db,
+        user_id,
+        [{"merchant": merchant, "description": description}],
+    )[0]
 
-    ruled = _from_rules(merchant, description)
-    if ruled:
-        return ruled, "rules", 0.9
 
-    llm = _from_llm(db, merchant, description)
-    if llm:
-        return llm, "llm", 0.75
+def classify_transactions(
+    db: Session,
+    user_id: int,
+    rows: Iterable[dict[str, str]],
+) -> list[tuple[str, str, float]]:
+    """
+    Hybrid classification:
+      1) personal mappings
+      2) deterministic rules
+      3) cached LLM result
+      4) one batched LLM request for unresolved merchants
+      5) fallback to Others
 
-    return "Others", "fallback", 0.3
+    The batched LLM step avoids dozens of serial API calls for a GPay statement.
+    """
+    items = [
+        {
+            "merchant": (row.get("merchant") or "unknown").strip(),
+            "description": (row.get("description") or "").strip(),
+        }
+        for row in rows
+    ]
+    mappings = db.query(MerchantMapping).filter(MerchantMapping.user_id == user_id).all()
+
+    results: list[tuple[str, str, float] | None] = [None] * len(items)
+    unresolved: list[tuple[int, str, str, str]] = []
+    cached_categories: dict[str, str] = {}
+
+    cache_keys = {_cache_key(item["merchant"], item["description"]) for item in items}
+    if cache_keys:
+        cached = db.query(LlmCache).filter(LlmCache.cache_key.in_(cache_keys)).all()
+        cached_categories = {row.cache_key: row.category for row in cached}
+
+    for index, item in enumerate(items):
+        merchant = item["merchant"]
+        description = item["description"]
+
+        mapped = _from_mapping_list(mappings, merchant)
+        if mapped:
+            results[index] = (mapped, "mapping", 0.99)
+            continue
+
+        ruled = _from_rules(merchant, description)
+        if ruled:
+            results[index] = (ruled, "rules", 0.95)
+            continue
+
+        key = _cache_key(merchant, description)
+        cached_category = cached_categories.get(key)
+        if cached_category in CATEGORIES:
+            results[index] = (cached_category, "llm-cache", 0.82)
+            continue
+
+        unresolved.append((index, key, merchant, description))
+
+    if unresolved:
+        unique_pending: dict[str, tuple[str, str]] = {}
+        for _, key, merchant, description in unresolved:
+            unique_pending.setdefault(key, (merchant, description))
+
+        llm_categories = _from_llm_batch(list(unique_pending.items()))
+
+        for index, key, _, _ in unresolved:
+            category = llm_categories.get(key)
+            if category in CATEGORIES:
+                results[index] = (category, "llm", 0.82)
+                if key not in cached_categories:
+                    db.add(LlmCache(cache_key=key, category=category, confidence=0.82))
+                    cached_categories[key] = category
+            else:
+                results[index] = ("Others", "fallback", 0.3)
+
+        if llm_categories:
+            db.flush()
+
+    return [result or ("Others", "fallback", 0.3) for result in results]
+
+
+def active_llm_provider() -> str | None:
+    """Return the provider/model that will be attempted first, if any key is configured."""
+    preferred = (settings.llm_provider or "").strip().lower()
+    if preferred == "openai" and settings.openai_api_key:
+        return f"OpenAI · {settings.openai_model}"
+    if preferred == "gemini" and settings.gemini_api_key:
+        return f"Gemini · {settings.gemini_model}"
+    if settings.gemini_api_key:
+        return f"Gemini · {settings.gemini_model}"
+    if settings.openai_api_key:
+        return f"OpenAI · {settings.openai_model}"
+    return None
 
 
 def learn_mapping(db: Session, user_id: int, raw_name: str, merchant: str, category: str) -> None:
@@ -163,11 +257,11 @@ def mark_recurring(db: Session, user_id: int) -> int:
     return flagged
 
 
-def _from_mapping(db: Session, user_id: int, merchant: str) -> str | None:
-    mappings = db.query(MerchantMapping).filter(MerchantMapping.user_id == user_id).all()
+def _from_mapping_list(mappings: list[MerchantMapping], merchant: str) -> str | None:
     for mapping in mappings:
         if mapping.normalized_name == merchant:
             return mapping.category
+
     best_score = 0
     best_category = None
     for mapping in mappings:
@@ -175,9 +269,7 @@ def _from_mapping(db: Session, user_id: int, merchant: str) -> str | None:
         if score > best_score:
             best_score = score
             best_category = mapping.category
-    if best_score >= 88:
-        return best_category
-    return None
+    return best_category if best_score >= 88 else None
 
 
 def _from_rules(merchant: str, description: str) -> str | None:
@@ -190,78 +282,138 @@ def _from_rules(merchant: str, description: str) -> str | None:
     return None
 
 
-def _from_llm(db: Session, merchant: str, description: str) -> str | None:
-    cache_key = f"{merchant}|{description[:80]}"
-    cached = db.query(LlmCache).filter(LlmCache.cache_key == cache_key).one_or_none()
-    if cached:
-        return cached.category
-
-    category = None
-    if settings.llm_provider == "openai" and settings.openai_api_key:
-        category = _openai_classify(merchant, description)
-    elif settings.gemini_api_key:
-        category = _gemini_classify(merchant, description)
-
-    if category in CATEGORIES:
-        db.add(LlmCache(cache_key=cache_key, category=category, confidence=0.75))
-        db.flush()
-        return category
-    return None
+def _cache_key(merchant: str, description: str) -> str:
+    return f"{merchant}|{description[:80]}"[:255]
 
 
-def _prompt(merchant: str, description: str) -> str:
+def _from_llm_batch(
+    pending: list[tuple[str, tuple[str, str]]],
+) -> dict[str, str]:
+    if not pending:
+        return {}
+
+    preferred = (settings.llm_provider or "").strip().lower()
+    providers: list[str] = []
+    if preferred in {"gemini", "openai"}:
+        providers.append(preferred)
+    for provider in ("gemini", "openai"):
+        if provider not in providers:
+            providers.append(provider)
+
+    for provider in providers:
+        if provider == "gemini" and settings.gemini_api_key:
+            result = _gemini_classify_batch(pending)
+            if result:
+                return result
+        if provider == "openai" and settings.openai_api_key:
+            result = _openai_classify_batch(pending)
+            if result:
+                return result
+    return {}
+
+
+def _batch_prompt(pending: list[tuple[str, tuple[str, str]]]) -> str:
     cats = ", ".join(CATEGORIES)
+    rows = [
+        {
+            "id": key,
+            "merchant": merchant,
+            "description": description,
+        }
+        for key, (merchant, description) in pending
+    ]
     return (
-        "You classify Indian personal finance transactions. "
-        f"Pick exactly one category from: {cats}. "
-        "Reply with JSON only: {\"category\": \"...\"}. "
-        f"Merchant: {merchant}. Description: {description}."
+        "You classify Indian personal-finance transactions from UPI and credit-card statements. "
+        "Use real-world merchant knowledge when helpful (brand names, parent companies, restaurant chains, "
+        "vending operators, pharmacies, supermarkets, travel services, subscriptions). "
+        "Do not guess a specific spending category for an ordinary person's name with no commercial clue; "
+        "use Others unless the text clearly indicates a transfer. "
+        f"Choose exactly one category for every row from: {cats}. "
+        "Return ONLY a JSON array. Each element must be "
+        '{"id":"the exact input id","category":"one allowed category"}. '
+        f"Rows: {json.dumps(rows, ensure_ascii=False)}"
     )
 
 
-def _parse_category(text: str) -> str | None:
+def _parse_batch_categories(text: str, valid_keys: set[str]) -> dict[str, str]:
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
     try:
-        data = json.loads(text)
-        category = data.get("category")
-        if category in CATEGORIES:
-            return category
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        pass
-    for category in CATEGORIES:
-        if category.lower() in (text or "").lower():
-            return category
-    return None
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("[")
+        end = cleaned.rfind("]")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            data = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
+
+    if not isinstance(data, list):
+        return {}
+
+    parsed: dict[str, str] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("id", ""))
+        category = item.get("category")
+        if key in valid_keys and category in CATEGORIES:
+            parsed[key] = category
+    return parsed
 
 
-def _gemini_classify(merchant: str, description: str) -> str | None:
+def _gemini_classify_batch(
+    pending: list[tuple[str, tuple[str, str]]],
+) -> dict[str, str]:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={settings.gemini_api_key}"
+        f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
     )
-    payload = {"contents": [{"parts": [{"text": _prompt(merchant, description)}]}]}
+    payload = {
+        "contents": [{"parts": [{"text": _batch_prompt(pending)}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+        },
+    }
     try:
-        response = httpx.post(url, json=payload, timeout=20)
+        response = httpx.post(url, json=payload, timeout=30)
         response.raise_for_status()
         text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return _parse_category(text)
+        return _parse_batch_categories(text, {key for key, _ in pending})
     except Exception:
-        return None
+        return {}
 
 
-def _openai_classify(merchant: str, description: str) -> str | None:
+def _openai_classify_batch(
+    pending: list[tuple[str, tuple[str, str]]],
+) -> dict[str, str]:
     try:
         response = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": _prompt(merchant, description)}],
-                "temperature": 0,
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
             },
-            timeout=20,
+            json={
+                "model": settings.openai_model,
+                "input": _batch_prompt(pending),
+                "temperature": 0,
+                "max_output_tokens": 5000,
+            },
+            timeout=30,
         )
         response.raise_for_status()
-        text = response.json()["choices"][0]["message"]["content"]
-        return _parse_category(text)
+        payload = response.json()
+        chunks: list[str] = []
+        for output in payload.get("output", []):
+            for content in output.get("content", []):
+                if content.get("type") == "output_text" and content.get("text"):
+                    chunks.append(content["text"])
+        return _parse_batch_categories("\n".join(chunks), {key for key, _ in pending})
     except Exception:
-        return None
+        return {}
