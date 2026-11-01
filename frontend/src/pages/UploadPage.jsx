@@ -6,6 +6,13 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatClassified(classified = {}) {
+  return Object.entries(classified)
+    .filter(([, count]) => count)
+    .map(([method, count]) => `${method}: ${count}`)
+    .join(" · ");
+}
+
 export default function UploadPage() {
   const [files, setFiles] = useState([]);
   const [results, setResults] = useState([]);
@@ -71,10 +78,7 @@ export default function UploadPage() {
       <div className="upload-hero">
         <span className="eyebrow">Statement importer</span>
         <h1>Turn statements into useful spending data</h1>
-        <p className="muted">
-          Upload Google Pay or credit-card PDFs. SpendSense detects the source,
-          extracts transactions, removes transfer noise, and categorizes the useful rows.
-        </p>
+        <p className="muted">Upload Google Pay or credit-card PDFs.</p>
       </div>
 
       <form className="card upload-card" onSubmit={submit}>
@@ -153,6 +157,9 @@ export default function UploadPage() {
                       {result.skipped ? ` · skipped ${result.skipped} duplicate${result.skipped === 1 ? "" : "s"}` : ""}
                       {result.bank_hint ? ` · ${result.bank_hint}` : ""}
                     </p>
+                    {formatClassified(result.classified) && (
+                      <p className="muted tiny">Classification: {formatClassified(result.classified)}</p>
+                    )}
                   </div>
                 </div>
               ) : (
