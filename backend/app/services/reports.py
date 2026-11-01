@@ -82,6 +82,7 @@ def monthly_summaries(db: Session, user_id: int) -> list[dict]:
         .all()
     )
     buckets: dict[str, dict] = {}
+
     for txn in txns:
         month = txn.txn_date.strftime("%Y-%m")
         bucket = buckets.setdefault(
@@ -91,15 +92,23 @@ def monthly_summaries(db: Session, user_id: int) -> list[dict]:
                 "total_debit": 0.0,
                 "total_credit": 0.0,
                 "transfer_out": 0.0,
+                "transfer_in": 0.0,
+                "net_transfers": 0.0,
                 "by_category": defaultdict(float),
                 "transaction_count": 0,
             },
         )
         bucket["transaction_count"] += 1
-        if txn.direction == "credit":
+
+        # Transfers are balance movements, not spending or income. Keep both
+        # directions and report net transfers as sent - received.
+        if txn.category == TRANSFER_CATEGORY:
+            if txn.direction == "credit":
+                bucket["transfer_in"] += txn.amount
+            else:
+                bucket["transfer_out"] += txn.amount
+        elif txn.direction == "credit":
             bucket["total_credit"] += txn.amount
-        elif txn.category == TRANSFER_CATEGORY:
-            bucket["transfer_out"] += txn.amount
         else:
             bucket["total_debit"] += txn.amount
             bucket["by_category"][txn.category] += txn.amount
@@ -108,7 +117,14 @@ def monthly_summaries(db: Session, user_id: int) -> list[dict]:
     for month in sorted(buckets):
         item = buckets[month]
         item["by_category"] = dict(item["by_category"])
-        for key in ("total_debit", "total_credit", "transfer_out"):
+        item["net_transfers"] = item["transfer_out"] - item["transfer_in"]
+        for key in (
+            "total_debit",
+            "total_credit",
+            "transfer_out",
+            "transfer_in",
+            "net_transfers",
+        ):
             item[key] = round(item[key], 2)
         rows.append(item)
     return rows
@@ -157,7 +173,10 @@ def excel_report(
         .all()
     )
     content = _build_excel_report(txns, label)
-    filename = f"spendsense-{start_dt.date().isoformat()}-to-{(end_dt.date() - timedelta(days=1)).isoformat()}.xlsx"
+    filename = (
+        f"spendsense-{start_dt.date().isoformat()}-to-"
+        f"{(end_dt.date() - timedelta(days=1)).isoformat()}.xlsx"
+    )
     return content, filename
 
 
@@ -183,25 +202,52 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     danger = "A94442"
     thin = Side(style="thin", color=line)
 
-    debit_txns = [t for t in txns if t.direction != "credit" and t.category != TRANSFER_CATEGORY]
-    credit_txns = [t for t in txns if t.direction == "credit"]
-    transfer_txns = [t for t in txns if t.direction != "credit" and t.category == TRANSFER_CATEGORY]
+    debit_txns = [
+        txn for txn in txns
+        if txn.direction != "credit" and txn.category != TRANSFER_CATEGORY
+    ]
+    credit_txns = [
+        txn for txn in txns
+        if txn.direction == "credit" and txn.category != TRANSFER_CATEGORY
+    ]
+    transfer_out_txns = [
+        txn for txn in txns
+        if txn.direction != "credit" and txn.category == TRANSFER_CATEGORY
+    ]
+    transfer_in_txns = [
+        txn for txn in txns
+        if txn.direction == "credit" and txn.category == TRANSFER_CATEGORY
+    ]
 
-    total_spent = round(sum(t.amount for t in debit_txns), 2)
-    total_credited = round(sum(t.amount for t in credit_txns), 2)
-    transfer_out = round(sum(t.amount for t in transfer_txns), 2)
+    total_spent = round(sum(txn.amount for txn in debit_txns), 2)
+    total_credited = round(sum(txn.amount for txn in credit_txns), 2)
+    transfer_out = round(sum(txn.amount for txn in transfer_out_txns), 2)
+    transfer_in = round(sum(txn.amount for txn in transfer_in_txns), 2)
+    net_transfers = round(transfer_out - transfer_in, 2)
 
-    monthly_map = defaultdict(lambda: {"spent": 0.0, "credited": 0.0, "transfers": 0.0, "count": 0})
+    monthly_map = defaultdict(
+        lambda: {
+            "spent": 0.0,
+            "credited": 0.0,
+            "transfer_out": 0.0,
+            "transfer_in": 0.0,
+            "count": 0,
+        }
+    )
     category_map = defaultdict(lambda: {"amount": 0.0, "count": 0})
     merchant_map = defaultdict(float)
 
     for txn in txns:
         month_key = txn.txn_date.strftime("%Y-%m")
         monthly_map[month_key]["count"] += 1
-        if txn.direction == "credit":
+
+        if txn.category == TRANSFER_CATEGORY:
+            if txn.direction == "credit":
+                monthly_map[month_key]["transfer_in"] += txn.amount
+            else:
+                monthly_map[month_key]["transfer_out"] += txn.amount
+        elif txn.direction == "credit":
             monthly_map[month_key]["credited"] += txn.amount
-        elif txn.category == TRANSFER_CATEGORY:
-            monthly_map[month_key]["transfers"] += txn.amount
         else:
             monthly_map[month_key]["spent"] += txn.amount
             category_map[txn.category]["amount"] += txn.amount
@@ -217,13 +263,16 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     overview.row_dimensions[2].height = 10
 
     overview.merge_cells("A3:M3")
-    overview["A3"] = f"Report period: {period_label}"
+    overview["A3"] = (
+        f"Report period: {period_label} · Net transfers = sent - received; "
+        "transfers are excluded from spending and credited income."
+    )
     overview["A3"].font = Font(size=10, color=muted, italic=True)
 
     cards = [
         ("A5:B7", "Spent", total_spent, steel_light, steel),
         ("C5:D7", "Credited", total_credited, sage_light, sage),
-        ("E5:F7", "Transfers", transfer_out, sand_light, sand),
+        ("E5:F7", "Net transfers", net_transfers, sand_light, sand),
         ("G5:H7", "Transactions", len(txns), "EEF1F4", navy),
     ]
     for cell_range, label, value, fill_color, accent in cards:
@@ -234,11 +283,23 @@ def _build_excel_report(txns, period_label: str) -> bytes:
         cell.font = Font(size=12, bold=True, color=navy)
         cell.fill = PatternFill("solid", fgColor=fill_color)
         cell.alignment = Alignment(vertical="center", wrap_text=True)
-        cell.border = Border(left=Side(style="medium", color=accent), top=thin, right=thin, bottom=thin)
+        cell.border = Border(
+            left=Side(style="medium", color=accent),
+            top=thin,
+            right=thin,
+            bottom=thin,
+        )
 
     overview["A10"] = "Monthly summary"
     overview["A10"].font = Font(size=14, bold=True, color=navy)
-    monthly_headers = ["Month", "Spent", "Credited", "Net cash flow", "Transfers", "Transactions"]
+    monthly_headers = [
+        "Month",
+        "Spent",
+        "Credited",
+        "Net cash flow",
+        "Net transfers",
+        "Transactions",
+    ]
     for col, value in enumerate(monthly_headers, 1):
         cell = overview.cell(row=11, column=col, value=value)
         cell.font = Font(bold=True, color=white)
@@ -248,12 +309,13 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     months = sorted(monthly_map)
     for row_index, month_key in enumerate(months, 12):
         item = monthly_map[month_key]
+        month_net_transfers = item["transfer_out"] - item["transfer_in"]
         values = [
             month_key,
             round(item["spent"], 2),
             round(item["credited"], 2),
             round(item["credited"] - item["spent"], 2),
-            round(item["transfers"], 2),
+            round(month_net_transfers, 2),
             item["count"],
         ]
         for col_index, value in enumerate(values, 1):
@@ -262,10 +324,12 @@ def _build_excel_report(txns, period_label: str) -> bytes:
             cell.border = Border(bottom=thin)
             if col_index in (2, 3, 4, 5):
                 cell.number_format = '₹#,##0.00;[Red]-₹#,##0.00'
-            if col_index == 4 and isinstance(value, (int, float)) and value < 0:
+            if col_index in (4, 5) and isinstance(value, (int, float)) and value < 0:
                 cell.font = Font(color=danger)
 
-    category_rows = sorted(category_map.items(), key=lambda item: item[1]["amount"], reverse=True)
+    category_rows = sorted(
+        category_map.items(), key=lambda item: item[1]["amount"], reverse=True
+    )
     overview["H10"] = "Top categories"
     overview["H10"].font = Font(size=14, bold=True, color=navy)
     for col, value in enumerate(["Category", "Spent", "Share"], 8):
@@ -276,9 +340,15 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     for row_index, (category, info) in enumerate(category_rows[:8], 12):
         overview.cell(row_index, 8, category)
         overview.cell(row_index, 9, round(info["amount"], 2)).number_format = '₹#,##0.00'
-        overview.cell(row_index, 10, (info["amount"] / total_spent) if total_spent else 0).number_format = "0.0%"
+        overview.cell(
+            row_index,
+            10,
+            (info["amount"] / total_spent) if total_spent else 0,
+        ).number_format = "0.0%"
 
-    top_merchants = sorted(merchant_map.items(), key=lambda item: item[1], reverse=True)[:8]
+    top_merchants = sorted(
+        merchant_map.items(), key=lambda item: item[1], reverse=True
+    )[:8]
     overview["L10"] = "Top merchants"
     overview["L10"].font = Font(size=14, bold=True, color=navy)
     for col, value in enumerate(["Merchant", "Spent"], 12):
@@ -317,24 +387,46 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     overview.freeze_panes = "A11"
     overview.sheet_view.showGridLines = False
     for col, width in {
-        "A": 14, "B": 15, "C": 15, "D": 17, "E": 15, "F": 14,
-        "G": 3, "H": 24, "I": 15, "J": 12, "K": 3, "L": 30, "M": 15
+        "A": 14,
+        "B": 15,
+        "C": 15,
+        "D": 17,
+        "E": 15,
+        "F": 14,
+        "G": 3,
+        "H": 24,
+        "I": 15,
+        "J": 12,
+        "K": 3,
+        "L": 30,
+        "M": 15,
     }.items():
         overview.column_dimensions[col].width = width
 
-    txn_headers = ["Date", "Merchant", "Category", "Amount", "Direction", "Source", "Description", "Recurring"]
+    txn_headers = [
+        "Date",
+        "Merchant",
+        "Category",
+        "Amount",
+        "Direction",
+        "Source",
+        "Description",
+        "Recurring",
+    ]
     transactions.append(txn_headers)
     for txn in sorted(txns, key=lambda item: item.txn_date, reverse=True):
-        transactions.append([
-            txn.txn_date.date(),
-            txn.merchant,
-            txn.category,
-            round(txn.amount, 2),
-            txn.direction.title(),
-            txn.source.replace("_", " ").title(),
-            txn.cleaned_description or txn.raw_description,
-            "Yes" if getattr(txn, "is_recurring", False) else "No",
-        ])
+        transactions.append(
+            [
+                txn.txn_date.date(),
+                txn.merchant,
+                txn.category,
+                round(txn.amount, 2),
+                txn.direction.title(),
+                txn.source.replace("_", " ").title(),
+                txn.cleaned_description or txn.raw_description,
+                "Yes" if getattr(txn, "is_recurring", False) else "No",
+            ]
+        )
     _style_data_sheet(transactions, "TransactionsTable", navy, soft, line, white)
     transactions.freeze_panes = "A2"
     transactions.column_dimensions["A"].width = 13
@@ -353,30 +445,41 @@ def _build_excel_report(txns, period_label: str) -> bytes:
     monthly.append(monthly_headers)
     for month_key in months:
         item = monthly_map[month_key]
-        monthly.append([
-            month_key,
-            round(item["spent"], 2),
-            round(item["credited"], 2),
-            round(item["credited"] - item["spent"], 2),
-            round(item["transfers"], 2),
-            item["count"],
-        ])
+        monthly.append(
+            [
+                month_key,
+                round(item["spent"], 2),
+                round(item["credited"], 2),
+                round(item["credited"] - item["spent"], 2),
+                round(item["transfer_out"] - item["transfer_in"], 2),
+                item["count"],
+            ]
+        )
     _style_data_sheet(monthly, "MonthlyTable", navy, soft, line, white)
     monthly.freeze_panes = "A2"
     for col in "BCDE":
         for cell in monthly[col][1:]:
             cell.number_format = '₹#,##0.00;[Red]-₹#,##0.00'
-    for col, width in {"A": 14, "B": 16, "C": 16, "D": 18, "E": 16, "F": 14}.items():
+    for col, width in {
+        "A": 14,
+        "B": 16,
+        "C": 16,
+        "D": 18,
+        "E": 16,
+        "F": 14,
+    }.items():
         monthly.column_dimensions[col].width = width
 
     categories.append(["Category", "Spent", "Share of spend", "Transactions"])
     for category, info in category_rows:
-        categories.append([
-            category,
-            round(info["amount"], 2),
-            (info["amount"] / total_spent) if total_spent else 0,
-            info["count"],
-        ])
+        categories.append(
+            [
+                category,
+                round(info["amount"], 2),
+                (info["amount"] / total_spent) if total_spent else 0,
+                info["count"],
+            ]
+        )
     _style_data_sheet(categories, "CategoriesTable", navy, soft, line, white)
     categories.freeze_panes = "A2"
     categories.column_dimensions["A"].width = 28
