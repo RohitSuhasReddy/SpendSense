@@ -7,7 +7,12 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import CATEGORIES, Transaction, User
 from app.schemas import TransactionOut, TransactionUpdate
-from app.services.classifier import classify_transaction, learn_mapping, mark_recurring
+from app.services.classifier import (
+    active_llm_provider,
+    classify_transactions,
+    learn_mapping,
+    mark_recurring,
+)
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
@@ -41,6 +46,57 @@ def list_transactions(
 @router.get("/categories")
 def categories():
     return CATEGORIES
+
+
+@router.get("/classifier-status")
+def classifier_status():
+    provider = active_llm_provider()
+    return {
+        "llm_enabled": bool(provider),
+        "llm_provider": provider,
+    }
+
+
+@router.post("/reclassify")
+def reclassify(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    txns = (
+        db.query(Transaction)
+        .filter(Transaction.user_id == user.id, Transaction.is_corrected.is_(False))
+        .all()
+    )
+    classifications = classify_transactions(
+        db,
+        user.id,
+        [
+            {
+                "merchant": txn.merchant,
+                "description": txn.cleaned_description or txn.raw_description,
+            }
+            for txn in txns
+        ],
+    )
+
+    updated = 0
+    classified: dict[str, int] = {}
+    for txn, (category, method, confidence) in zip(txns, classifications):
+        classified[method] = classified.get(method, 0) + 1
+        if (
+            category != txn.category
+            or method != txn.classification_method
+            or confidence != txn.confidence
+        ):
+            txn.category = category
+            txn.classification_method = method
+            txn.confidence = confidence
+            updated += 1
+
+    mark_recurring(db, user.id)
+    db.commit()
+    return {
+        "updated": updated,
+        "classified": classified,
+        "llm_provider": active_llm_provider(),
+    }
 
 
 @router.patch("/{txn_id}", response_model=TransactionOut)
@@ -84,19 +140,3 @@ def correct_transaction(
     db.commit()
     db.refresh(txn)
     return txn
-
-
-@router.post("/reclassify")
-def reclassify(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    txns = db.query(Transaction).filter(Transaction.user_id == user.id, Transaction.is_corrected.is_(False)).all()
-    updated = 0
-    for txn in txns:
-        category, method, confidence = classify_transaction(db, user.id, txn.merchant, txn.cleaned_description)
-        if category != txn.category or method != txn.classification_method:
-            txn.category = category
-            txn.classification_method = method
-            txn.confidence = confidence
-            updated += 1
-    mark_recurring(db, user.id)
-    db.commit()
-    return {"updated": updated}
