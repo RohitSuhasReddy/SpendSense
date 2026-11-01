@@ -221,7 +221,7 @@ def learn_mapping(db: Session, user_id: int, raw_name: str, merchant: str, categ
     else:
         db.add(
             MerchantMapping(
-                user_id=user_id,
+                user_id=user.id,
                 raw_name=raw_name,
                 normalized_name=merchant,
                 category=category,
@@ -280,7 +280,7 @@ def _from_rules(merchant: str, description: str) -> str | None:
 
 
 def _cache_key(merchant: str, description: str) -> str:
-    return f"{merchant}|{description[:80]}"[:255]
+    return f"v2|{merchant}|{description[:80]}"[:255]
 
 
 def _from_llm_batch(
