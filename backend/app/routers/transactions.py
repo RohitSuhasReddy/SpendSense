@@ -18,6 +18,14 @@ from app.services.llm_transport import get_last_llm_error
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
 
+def _classification_context(txn: Transaction) -> str:
+    description = txn.cleaned_description or txn.raw_description
+    return (
+        f"{description} | amount=₹{txn.amount:.2f} "
+        f"| source={txn.source} | time={txn.txn_date.strftime('%H:%M')}"
+    )
+
+
 @router.get("", response_model=list[TransactionOut])
 def list_transactions(
     category: str | None = None,
@@ -72,7 +80,7 @@ def reclassify(db: Session = Depends(get_db), user: User = Depends(get_current_u
         [
             {
                 "merchant": txn.merchant,
-                "description": txn.cleaned_description or txn.raw_description,
+                "description": _classification_context(txn),
             }
             for txn in txns
         ],
