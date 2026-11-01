@@ -39,7 +39,34 @@ function monthLabel(value) {
 }
 
 function money(value) {
-  return `₹${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const amount = Number(value || 0);
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+function renderPiePercentLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }) {
+  if (percent < 0.08) return null;
+  const radius = innerRadius + (outerRadius - innerRadius) * 0.53;
+  const radians = (-midAngle * Math.PI) / 180;
+  const x = cx + radius * Math.cos(radians);
+  const y = cy + radius * Math.sin(radians);
+
+  return (
+    <text
+      x={x}
+      y={y}
+      fill="#f4f6f8"
+      textAnchor="middle"
+      dominantBaseline="central"
+      fontSize={11}
+      fontWeight={700}
+    >
+      {(percent * 100).toFixed(0)}%
+    </text>
+  );
 }
 
 export default function Dashboard() {
@@ -88,7 +115,6 @@ export default function Dashboard() {
         month: monthLabel(item.month),
         rawMonth: item.month,
         spent: Number(item.total_debit || 0),
-        transfers: Number(item.transfer_out || 0),
       })),
     [data]
   );
@@ -222,12 +248,12 @@ export default function Dashboard() {
         <article className="card">
           <div className="muted">Credited</div>
           <strong>{money(selected?.total_credit)}</strong>
-          <span className="muted tiny">{monthLabel(selected?.month)}</span>
+          <span className="muted tiny">Transfers excluded</span>
         </article>
         <article className="card">
-          <div className="muted">Transfers</div>
-          <strong>{money(selected?.transfer_out)}</strong>
-          <span className="muted tiny">Self / family movement</span>
+          <div className="muted">Net transfers</div>
+          <strong>{money(selected?.net_transfers)}</strong>
+          <span className="muted tiny">Sent − received</span>
         </article>
       </div>
 
@@ -236,7 +262,7 @@ export default function Dashboard() {
           <div className="chart-heading">
             <div>
               <h2>Monthly spend trend</h2>
-              <p className="muted tiny">All imported months. Click the selector above to inspect any month.</p>
+              <p className="muted tiny">All imported months. Transfers are excluded.</p>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={300}>
@@ -250,14 +276,13 @@ export default function Dashboard() {
                 tickFormatter={(value) => `₹${Math.round(value / 1000)}k`}
               />
               <Tooltip
-                formatter={(value, name) => [money(value), name === "spent" ? "Spent" : "Transfers"]}
+                formatter={(value) => [money(value), "Spent"]}
                 contentStyle={{
                   background: "#161b22",
                   border: "1px solid #303844",
                   borderRadius: 10,
                 }}
               />
-              <Legend />
               <Line
                 type="monotone"
                 dataKey="spent"
@@ -266,15 +291,6 @@ export default function Dashboard() {
                 strokeWidth={2.5}
                 dot={{ r: 3, fill: "#71869a" }}
                 activeDot={{ r: 5 }}
-              />
-              <Line
-                type="monotone"
-                dataKey="transfers"
-                name="Transfers"
-                stroke="#7a8176"
-                strokeWidth={1.8}
-                strokeDasharray="5 5"
-                dot={false}
               />
             </LineChart>
           </ResponsiveContainer>
@@ -294,33 +310,33 @@ export default function Dashboard() {
                 <p className="muted tiny">{monthLabel(selected?.month)} · {money(totalSpent)} spent</p>
               </div>
             </div>
-            <ResponsiveContainer width="100%" height={310}>
-              <PieChart>
+            <ResponsiveContainer width="100%" height={320}>
+              <PieChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
                 <Pie
                   data={categoryData}
                   dataKey="value"
                   nameKey="name"
                   cx="50%"
-                  cy="48%"
+                  cy="44%"
                   outerRadius={105}
                   innerRadius={66}
                   paddingAngle={1}
                   labelLine={false}
-                  label={({ name, percent }) => (percent >= 0.08 ? `${name} ${(percent * 100).toFixed(0)}%` : "")}
+                  label={renderPiePercentLabel}
                 >
                   {categoryData.map((_, index) => (
                     <Cell key={`cell-${index}`} fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]} />
                   ))}
                 </Pie>
                 <Tooltip
-                  formatter={(value) => money(value)}
+                  formatter={(value, name) => [money(value), name]}
                   contentStyle={{
                     background: "#161b22",
                     border: "1px solid #303844",
                     borderRadius: 10,
                   }}
                 />
-                <Legend wrapperStyle={{ fontSize: 12, color: "#a7b0bb" }} />
+                <Legend wrapperStyle={{ fontSize: 12, color: "#a7b0bb", paddingTop: 8 }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
