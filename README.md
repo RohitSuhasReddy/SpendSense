@@ -16,7 +16,6 @@ The project is designed around a simple workflow:
 - Dedicated ICICI credit-card parsing path.
 - Generic table/line parser as a fallback for other statement layouts.
 - Duplicate detection makes repeated monthly imports safer.
-- Google Pay UPI Lite top-ups are ignored as spending so wallet funding is not double-counted.
 - Self-transfers remain identifiable instead of being mixed into normal spending.
 
 ### Hybrid transaction categorization
